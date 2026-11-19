@@ -1,0 +1,678 @@
+---
+title: "Inventario y análisis espacial del acueducto de Santa Teresita de Boruca"
+subtitle: "Ampliación geoespacial de la Tarea 2"
+author: "Marcos Chaves Ulate"
+lang: es
+language:
+  title-block-author-single: "Autor"
+format:
+  html:
+    toc: true
+    toc-title: "Contenido"
+    code-fold: true
+    code-summary: "Mostrar código en R"
+    embed-resources: true
+execute:
+  message: false
+  warning: false
+params:
+  datos: "https://raw.githubusercontent.com/Mrxs4915/Tarea-3-cursoR/main/santa_teresita.gpkg"
+---
+
+## Introducción
+
+Mi proyecto del curso es una herramienta para registrar y analizar las afectaciones de los acueductos rurales. En la Tarea 1 la planteé con el ejemplo del acueducto de Cajón de Boruca, y en la Tarea 2 procesé en R dos archivos CSV de ese sistema: 9 puntos de infraestructura y 7 registros de tubería, sin la geometría de las líneas. Con esos datos respondí cuántos componentes estaban operativos o afectados, qué tipos de infraestructura tenían afectaciones y cómo se distribuían los estados de las tuberías.
+
+En los comentarios de la Tarea 2 recibí la recomendación de ampliar los datos con el levantamiento completo, con las geometrías de los puntos y de las líneas de tubería. El levantamiento de Cajón de Boruca no tiene más elementos que los que usé: su propósito era evaluar las condiciones de la tubería de conducción entre las nacientes y el tanque, y solo cubrió esa parte del sistema. Por eso cambié de caso de estudio al acueducto de Santa Teresita de Boruca, cuyo levantamiento tiene muchos más elementos y las geometrías de los puntos y de las tuberías. Mantengo el mismo tema: la infraestructura de un acueducto rural.
+
+El sistema funciona como una cadena. El agua de la naciente llega a una caseta de bombeo y desde ahí sube por la conducción hasta un tanque de almacenamiento. Del tanque baja una tubería hasta una T, donde la distribución se divide en un ramal hacia el oeste y otro hacia el este; del ramal este salen dos ramales hacia el norte. Los ramales este y norte principal tienen cada uno un tanque quiebragradiente (TQG) de 1,2 m³.
+
+Este levantamiento registra la ubicación, la cota y el diámetro de las tuberías, pero no el estado ni las afectaciones de los componentes. Por eso no puedo calcular longitudes por estado ni repetir los conteos de la Tarea 2, y adapté las preguntas a lo que estos datos sí permiten medir:
+
+1. ¿Cuánta tubería cartografié y cómo se distribuye por diámetro?
+2. ¿Qué desnivel tiene la conducción, desde la naciente hasta el tanque de almacenamiento?
+3. **Pregunta espacial:** ¿en qué cantón se ubica el sistema y en qué partes de la red de distribución se concentran las mayores presiones estáticas?
+
+Los datos provienen del levantamiento CT014-Santa Teresita (Cenit Topografía, 2025; <https://github.com/Mrxs4915/Tarea-3-cursoR>). Convertí sus tres shapefiles a un GeoPackage, `santa_teresita.gpkg`, con tres capas en CR05 / CRTM05 (EPSG:5367):
+
+- `lineas`: 30 polilíneas 3D exportadas de AutoCAD, de las cuales 14 son tubería. Sus atributos principales son `Layer`, el nombre de la capa CAD, del que obtengo el diámetro nominal (por ejemplo, `_Tub1.5` es tubería de 1,5 pulgadas), y `EntityHand`, el identificador de cada entidad en el dibujo.
+- `levantamiento`: 198 puntos 3D. Sus cinco atributos vienen de un CSV sin encabezado: `field_1` es el número del punto, `field_2` y `field_3` son las coordenadas Este y Norte, `field_4` es la cota en metros y `field_5` es el código de campo. Hay 40 códigos distintos, que combinan vértices de tubería, partes de estructuras, válvulas y puntos de control.
+- `puntos_interes`: 7 de esos mismos 198 puntos, renombrados como estructuras principales (naciente, paso elevado, caseta de bombeo, tanques y medidor).
+
+Como segunda capa uso los límites cantonales del Instituto Geográfico Nacional (s. f.), que el repositorio del curso ofrece como `cantones.gpkg`: 84 multipolígonos en CR-SIRGAS / CRTM05 (EPSG:8908), con el nombre y el código del cantón y de la provincia. Hago todas las mediciones en CRTM05 y dibujo el mapa web en WGS84.
+
+## Importación y preparación
+
+Cargo los paquetes de las lecciones: sf para las capas, dplyr para transformarlas, ggplot2 y plotly para los gráficos, DT para la tabla interactiva y leaflet para el mapa web. Defino además la nota de fuente de los gráficos y una función que da formato a los números con separador de miles y coma decimal.
+
+```{r}
+#| label: paquetes
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(DT)
+library(plotly)
+library(leaflet)
+
+fuente <- "Fuente: Cenit Topografía (2025), levantamiento CT014-Santa Teresita."
+fuente_mapa <- "Fuentes: Cenit Topografía (2025), levantamiento CT014-Santa Teresita; IGN (s. f.), límite cantonal."
+num <- function(x, d = 2) {
+  scales::number(x, accuracy = 10^-d, big.mark = " ", decimal.mark = ",")
+}
+```
+
+Leo las tres capas del levantamiento desde la URL Raw de mi repositorio, que guardo en el parámetro `datos`, y los cantones desde el repositorio del curso. Uso `quiet = TRUE` para que `st_read()` no imprima mensajes.
+
+```{r}
+#| label: leer-capas
+url_datos <- params$datos
+url_cantones <- "https://raw.githubusercontent.com/pf0953-programacionr/2026-ii/main/datos/cantones.gpkg"
+
+lineas <- st_read(url_datos, layer = "lineas", quiet = TRUE)
+puntos <- st_read(url_datos, layer = "levantamiento", quiet = TRUE)
+interes <- st_read(url_datos, layer = "puntos_interes", quiet = TRUE)
+cantones <- st_read(url_cantones, quiet = TRUE)
+```
+
+Antes de transformar nada, reviso la estructura de las capas: el SRC, la cantidad de entidades, el tipo de geometría y los atributos.
+
+```{r}
+#| label: explorar-capas
+print(puntos, n = 3)
+sapply(list(lineas = lineas, levantamiento = puntos, interes = interes, cantones = cantones),
+       \(capa) st_crs(capa)$epsg)
+sapply(list(lineas = lineas, levantamiento = puntos, interes = interes, cantones = cantones),
+       nrow)
+sapply(list(lineas = lineas, levantamiento = puntos, interes = interes, cantones = cantones),
+       \(capa) as.character(st_geometry_type(capa, by_geometry = FALSE)))
+names(lineas)
+```
+
+```{r}
+#| label: fig-exploracion
+#| fig-cap: "Líneas CAD y puntos del levantamiento en CR05 / CRTM05 (coordenadas en metros). Fuente: levantamiento CT014-Santa Teresita."
+plot(st_geometry(st_zm(lineas)), col = "grey60", axes = TRUE,
+     main = "Líneas CAD y puntos del levantamiento",
+     xlim = st_bbox(puntos)[c("xmin", "xmax")],
+     ylim = st_bbox(puntos)[c("ymin", "ymax")])
+plot(st_geometry(st_zm(puntos)), add = TRUE, pch = 20, cex = 0.6, col = "#245878")
+```
+
+La @fig-exploracion muestra que las líneas CAD siguen a los puntos del levantamiento: la red se extiende unos 2,5 km de oeste a este, con varios ramales hacia el norte y el sur.
+
+El levantamiento está en CR05 / CRTM05 (EPSG:5367), el SRC oficial anterior, y los cantones del IGN están en CR-SIRGAS / CRTM05 (EPSG:8908), el oficial actual. Para combinar capas en una operación espacial, todas deben estar en el mismo SRC, así que reproyecto el levantamiento a EPSG:8908 con `st_transform()`. Las dos versiones usan la misma proyección y difieren en centímetros, por lo que las longitudes y distancias no cambian.
+
+```{r}
+#| label: transformar-src
+lineas <- st_transform(lineas, 8908)
+puntos <- st_transform(puntos, 8908)
+interes <- st_transform(interes, 8908)
+
+stopifnot(all(vapply(list(lineas, puntos, interes, cantones),
+                    \(capa) st_crs(capa)$epsg == 8908, logical(1))))
+```
+
+Ahora preparo las capas. Separo las 14 polilíneas de tubería según su capa CAD y les asigno el diámetro. La capa `_Tub`, que corresponde a la tubería que baja del tanque de almacenamiento hasta la T, no lleva el diámetro en su nombre; después de la medición corroboré con los planos de diseño del sistema que es de 3 pulgadas. Con `st_zm()` quito la cota de la geometría de las tuberías, porque las longitudes que mido son en planta. Renombro los atributos de los puntos y agrego a los puntos de interés su código de campo. El código del medidor es `MedidorLuz`, así que corrijo su nombre: es un medidor eléctrico y no un elemento del acueducto.
+
+```{r}
+#| label: preparar-capas
+diametros <- c("_Tub1" = "1", "_Tub1.5" = "1,5", "_Tub2" = "2",
+               "_Tub2.5" = "2,5", "_Tub3" = "3", "_Tub" = "3")
+tuberias <- lineas |>
+  filter(Layer %in% names(diametros)) |>
+  st_zm() |>
+  mutate(diametro = factor(unname(diametros[Layer]),
+                           levels = c("1", "1,5", "2", "2,5", "3")))
+tuberias$longitud_m <- as.numeric(st_length(tuberias))
+tuberias$componente <- if_else(tuberias$EntityHand %in% c("DB", "13"),
+                               "Conducción", "Distribución")
+
+puntos <- puntos |>
+  rename(id = field_1, este_cr05 = field_2, norte_cr05 = field_3,
+         cota_m = field_4, codigo = field_5)
+
+interes <- interes |>
+  rename(id = field_1, cota_m = field_4, elemento = field_5) |>
+  st_zm() |>
+  left_join(st_drop_geometry(puntos) |> select(id, codigo), by = "id") |>
+  mutate(elemento = if_else(id == 3 & codigo == "MedidorLuz",
+                            "Medidor eléctrico", elemento))
+
+resumen_red <- tuberias |>
+  st_drop_geometry() |>
+  group_by(diametro) |>
+  summarise(polilineas = n(), longitud_m = sum(longitud_m), .groups = "drop")
+
+cota_el <- setNames(interes$cota_m, interes$id)
+```
+
+Calculo aquí las cifras de apoyo que cito más adelante: la longitud 3D de la tubería, la distancia del medidor a la capa eléctrica y la coherencia entre el diámetro del código de campo y el de la tubería más cercana. Como `st_length()` mide en planta, obtengo la longitud 3D sumando los segmentos entre vértices con su componente vertical.
+
+```{r}
+#| label: verificaciones
+lon <- setNames(resumen_red$longitud_m, as.character(resumen_red$diametro))
+longitud_2d <- sum(tuberias$longitud_m)
+
+longitud_3d <- lineas |>
+  filter(Layer %in% names(diametros)) |>
+  st_coordinates() |>
+  as.data.frame() |>
+  group_by(L1) |>
+  summarise(l = sum(sqrt(diff(X)^2 + diff(Y)^2 + diff(Z)^2))) |>
+  pull(l) |>
+  sum()
+
+electrico <- lineas |>
+  filter(Layer == "_Electrico") |>
+  st_zm()
+dist_electrico <- min(as.numeric(st_distance(filter(interes, id == 3), electrico)))
+
+patron <- "^Tub([0-9](\\.[0-9])?)?(Cond|CondPE)?$"
+puntos_tub <- puntos |>
+  st_zm() |>
+  filter(grepl(patron, codigo)) |>
+  mutate(d_codigo = sub(patron, "\\1", codigo))
+puntos_tub$d_linea <- sub("^_Tub", "",
+                          tuberias$Layer[st_nearest_feature(puntos_tub, tuberias)])
+coherencia <- puntos_tub |>
+  st_drop_geometry() |>
+  summarise(con_diametro = sum(d_codigo != ""),
+            coinciden = sum(d_codigo != "" & d_codigo == d_linea),
+            sin_diametro = sum(d_codigo == ""),
+            sin_diametro_en_salida = sum(d_codigo == "" & d_linea == ""))
+texto_coherencia <- if (coherencia$coinciden == coherencia$con_diametro) {
+  paste("los", coherencia$con_diametro, "puntos")
+} else {
+  paste(coherencia$coinciden, "de los", coherencia$con_diametro, "puntos")
+}
+
+codigos <- puntos |>
+  st_drop_geometry() |>
+  count(codigo, sort = TRUE)
+
+knitr::kable(data.frame(
+  Medida = c("Longitud de tubería en planta (m)", "Longitud de tubería en 3D (m)",
+             "Distancia del medidor a la capa _Electrico (m)"),
+  Valor = c(num(longitud_2d), num(longitud_3d), num(dist_electrico))))
+knitr::kable(coherencia,
+             col.names = c("Puntos con diámetro en el código", "Coinciden con la línea",
+                           "Puntos Tub sin diámetro", "De ellos, en la salida del tanque"))
+```
+
+Los diámetros que obtengo del nombre de la capa CAD concuerdan con el código de campo en `r texto_coherencia` de tubería que indican diámetro. Otros `r coherencia$sin_diametro` puntos llevan el código genérico `Tub`, sin diámetro; `r coherencia$sin_diametro_en_salida` de ellos están en la tubería que baja del tanque, que según los planos de diseño es de 3 pulgadas.
+
+Por último, defino una función que arma un recorrido a partir de varias tuberías: une sus vértices en orden, invierte las que están dibujadas en sentido contrario, mide la distancia acumulada en planta y asigna a cada vértice el número del punto del levantamiento más cercano. La uso para el perfil de la conducción y para la presión estática de los ramales.
+
+```{r}
+#| label: funcion-recorrido
+recorrido <- function(tramos, invertir = character(0)) {
+  vertices <- lapply(tramos, \(h) {
+    xyz <- st_coordinates(filter(lineas, EntityHand == h))
+    if (h %in% invertir) xyz <- xyz[nrow(xyz):1, , drop = FALSE]
+    data.frame(tramo = h, x = xyz[, "X"], y = xyz[, "Y"], cota_m = xyz[, "Z"])
+  }) |>
+    bind_rows() |>
+    mutate(distancia_m = cumsum(c(0, sqrt(diff(x)^2 + diff(y)^2))))
+  cercano <- st_nearest_feature(st_as_sf(vertices, coords = c("x", "y"), crs = 8908),
+                                st_zm(puntos))
+  vertices |>
+    mutate(punto = puntos$id[cercano], codigo = puntos$codigo[cercano],
+           diametro = tuberias$diametro[match(tramo, tuberias$EntityHand)])
+}
+```
+
+## Relación con otra capa: cantón del sistema
+
+Para ubicar el sistema en la división territorial, uní los 198 puntos del levantamiento con los cantones del IGN mediante una unión espacial, `st_join()` con `st_within`, que asigna a cada punto el cantón que lo contiene. Las dos capas están en EPSG:8908, un SRC proyectado en metros. Luego conté los puntos por cantón con `count()` y medí con `st_distance()` la distancia de la red al límite del cantón.
+
+```{r}
+#| label: union-cantones
+resumen_canton <- puntos |>
+  st_zm() |>
+  st_join(select(cantones, provincia, canton), join = st_within) |>
+  st_drop_geometry() |>
+  count(provincia, canton, name = "puntos")
+
+canton_sistema <- cantones |>
+  filter(canton %in% resumen_canton$canton)
+dist_limite <- min(as.numeric(st_distance(tuberias, st_boundary(canton_sistema))))
+
+knitr::kable(resumen_canton, col.names = c("Provincia", "Cantón", "Puntos del levantamiento"))
+```
+
+Los `r sum(resumen_canton$puntos)` puntos del levantamiento quedan en el cantón de `r resumen_canton$canton[1]`, en la provincia de `r resumen_canton$provincia[1]`. La tubería más cercana al límite cantonal está a `r num(dist_limite / 1000, 1)` km de él, de modo que todo el sistema pertenece a un solo cantón.
+
+## Tablas y gráficos
+
+### Elementos principales
+
+Esta tabla es pequeña, así que la presento con `knitr::kable()`, como recomienda la lección de DT para los resultados de pocas filas. Reúne las cotas de los elementos principales del sistema, que uso como referencia en el resto del documento.
+
+```{r}
+#| label: tabla-elementos
+interes |>
+  st_drop_geometry() |>
+  filter(id != 3) |>
+  mutate(orden = match(id, c(5, 8, 136, 156, 67, 115))) |>
+  arrange(orden) |>
+  transmute(Elemento = elemento, Punto = paste0("P", id), `Código de campo` = codigo,
+            `Cota (m)` = num(cota_m, 3)) |>
+  knitr::kable(align = "lllr")
+```
+
+La naciente está a `r num(cota_el[["5"]], 1)` m y la caseta de bombeo a `r num(cota_el[["136"]], 1)` m. El tanque de almacenamiento, a `r num(cota_el[["156"]], 1)` m, es el punto más alto del sistema. Los dos TQG están a `r num(cota_el[["67"]], 1)` m (P67, ramal norte principal) y `r num(cota_el[["115"]], 1)` m (P115, ramal este). Dejo fuera el medidor eléctrico, que no es parte del acueducto.
+
+### Inventario del levantamiento
+
+La tabla interactiva contiene los `r nrow(puntos)` puntos del levantamiento. Con los filtros de la parte superior, quien lea el informe puede elegir un código de campo o un rango de cotas.
+
+```{r}
+#| label: tabla-levantamiento
+puntos |>
+  st_drop_geometry() |>
+  arrange(id) |>
+  transmute(Punto = id, `Código de campo` = factor(codigo),
+            `Este CR05 (m)` = este_cr05, `Norte CR05 (m)` = norte_cr05,
+            `Cota (m)` = cota_m) |>
+  datatable(
+    rownames = FALSE,
+    filter = "top",
+    caption = "Puntos del levantamiento de Santa Teresita de Boruca",
+    options = list(
+      pageLength = 10,
+      language = list(
+        search = "Buscar:",
+        lengthMenu = "Mostrar _MENU_ registros",
+        info = "Mostrando _START_ a _END_ de _TOTAL_ registros",
+        infoEmpty = "Sin registros",
+        infoFiltered = "(filtrados de _MAX_ registros)",
+        zeroRecords = "Sin coincidencias",
+        paginate = list(previous = "Anterior", "next" = "Siguiente")
+      )
+    )
+  ) |>
+  formatRound(c("Este CR05 (m)", "Norte CR05 (m)", "Cota (m)"), digits = 3,
+              mark = " ", dec.mark = ",")
+```
+
+Cada fila es un punto medido en campo, con su número, su código de campo, sus coordenadas originales en CR05 / CRTM05 y su cota. Los números van del 1 al 193 y del 1000 al 1004; estos últimos son puntos de control (`BasePlaza` y `AM1` a `AM4`), no componentes del acueducto. Al revisar los códigos, encontré `r nrow(codigos)` códigos distintos; el más frecuente es `r codigos$codigo[1]`, con `r codigos$n[1]` puntos. Los códigos no equivalen a tipos de activo: una misma estructura puede tener varios puntos, uno por vértice o por detalle.
+
+### Longitud por diámetro
+
+```{r}
+#| label: fig-longitud
+#| fig-cap: "Longitud horizontal de tubería por diámetro nominal. Fuente: levantamiento CT014-Santa Teresita."
+ggplot(resumen_red, aes(x = diametro, y = longitud_m)) +
+  geom_col(fill = "#146b73", width = 0.7) +
+  geom_text(aes(label = num(longitud_m, 0)), vjust = -0.4, size = 3.5) +
+  scale_y_continuous(labels = \(x) num(x, 0), expand = expansion(mult = c(0, 0.08))) +
+  labs(title = "Longitud de tubería por diámetro nominal",
+       x = "Diámetro nominal (pulgadas)", y = "Longitud horizontal (m)", caption = fuente) +
+  theme_minimal()
+```
+
+La @fig-longitud muestra que medí `r num(lon[["1,5"]])` m de tubería de 1,5 pulgadas (`r num(100 * lon[["1,5"]] / longitud_2d, 1)` % del total), `r num(lon[["2,5"]])` m de 2,5 pulgadas (`r num(100 * lon[["2,5"]] / longitud_2d, 1)` %) y `r num(lon[["1"]])` m de 1 pulgada (`r num(100 * lon[["1"]] / longitud_2d, 1)` %). La tubería de 3 pulgadas, incluida la que baja del tanque, suma `r num(lon[["3"]])` m, y la de 2 pulgadas, `r num(lon[["2"]])` m. Al sumar los segmentos con su componente vertical, obtuve `r num(longitud_3d)` m en 3D, `r num(longitud_3d - longitud_2d)` m más (`r num(100 * (longitud_3d / longitud_2d - 1), 1)` %).
+
+Separo también la longitud por componente del sistema. La conducción va de la naciente a la caseta de bombeo y de la caseta al tanque de almacenamiento; la distribución empieza en la tubería que baja del tanque.
+
+```{r}
+#| label: tabla-componentes
+resumen_componente <- tuberias |>
+  st_drop_geometry() |>
+  group_by(componente) |>
+  summarise(polilineas = n(), longitud_m = sum(longitud_m),
+            diametros = paste(sort(unique(as.character(diametro))), collapse = "; "),
+            .groups = "drop")
+lc <- setNames(resumen_componente$longitud_m, resumen_componente$componente)
+
+knitr::kable(data.frame(
+  Componente = c(resumen_componente$componente, "Total"),
+  `Diámetros (pulg)` = c(resumen_componente$diametros, ""),
+  Polilíneas = c(resumen_componente$polilineas, nrow(tuberias)),
+  `Longitud en planta (m)` = num(c(resumen_componente$longitud_m, longitud_2d)),
+  check.names = FALSE), align = "llrr")
+```
+
+De los `r num(longitud_2d)` m de tubería, `r num(lc[["Conducción"]])` m son de conducción y `r num(lc[["Distribución"]])` m, unos `r num(lc[["Distribución"]] / 1000, 1)` km, son de distribución. La distribución representa el `r num(100 * lc[["Distribución"]] / longitud_2d, 1)` % de la red.
+
+### Perfil de la conducción
+
+Para responder la segunda pregunta construí el perfil longitudinal de la conducción: la cota de cada vértice de la tubería contra la distancia recorrida en planta desde la naciente hasta el tanque de almacenamiento. El gráfico es interactivo: al pasar el cursor sobre un vértice aparecen el número del punto, su código de campo, la cota, la distancia y el diámetro.
+
+```{r}
+#| label: fig-perfil
+#| fig-cap: "Perfil longitudinal de la conducción, de la naciente al tanque de almacenamiento. Fuente: levantamiento CT014-Santa Teresita."
+conduccion <- recorrido(c("DB", "13")) |>
+  mutate(seccion = if_else(tramo == "DB", "Naciente a caseta (2 pulg)",
+                           "Bombeo a tanque (2,5 pulg)"))
+
+ubicar_en <- function(ids, perfil) {
+  vertices <- st_as_sf(perfil, coords = c("x", "y"), crs = 8908)
+  elementos <- filter(interes, id %in% ids)
+  elementos |>
+    st_drop_geometry() |>
+    mutate(distancia_m = perfil$distancia_m[st_nearest_feature(elementos, vertices)])
+}
+
+elementos_conduccion <- ubicar_en(c(5, 8, 136, 156), conduccion) |>
+  mutate(rotulo = case_when(
+           id == 5 ~ "Naciente (P5)",
+           id == 8 ~ "Paso elevado (P8)",
+           id == 136 ~ "Caseta de bombeo (P136)",
+           id == 156 ~ "Tanque (P156)"),
+         y_rotulo = cota_m + case_when(id == 5 ~ 12, id == 8 ~ -10,
+                                       id == 136 ~ -12, id == 156 ~ 12),
+         x_rotulo = distancia_m + case_when(id == 5 ~ 45, id == 8 ~ 20,
+                                            id == 136 ~ 80, id == 156 ~ -80))
+
+desnivel_bombeo <- cota_el[["156"]] - cota_el[["136"]]
+largo_bombeo <- tuberias$longitud_m[tuberias$EntityHand == "13"]
+largo_conduccion <- max(conduccion$distancia_m)
+
+grafico_perfil <- ggplot(conduccion, aes(x = distancia_m, y = cota_m)) +
+  geom_line(aes(colour = seccion, group = seccion), linewidth = 1) +
+  geom_point(aes(colour = seccion,
+                 text = paste0("Punto P", punto, " (", codigo, ")",
+                               "\nCota: ", num(cota_m, 2), " m",
+                               "\nDistancia desde la naciente: ", num(distancia_m, 1), " m",
+                               "\nDiámetro: ", diametro, " pulg")),
+             size = 1.8, show.legend = FALSE) +
+  geom_point(data = elementos_conduccion, colour = "black", size = 2.8) +
+  geom_text(data = elementos_conduccion,
+            aes(x = x_rotulo, y = y_rotulo, label = rotulo), size = 3.2) +
+  annotate("text", x = 330, y = 790,
+           label = paste0("Bombeo: sube ", num(desnivel_bombeo, 1), " m"),
+           size = 3.4, fontface = "bold") +
+  scale_colour_manual(values = c("Naciente a caseta (2 pulg)" = "#4575b4",
+                                 "Bombeo a tanque (2,5 pulg)" = "#d97904"),
+                      name = NULL) +
+  scale_x_continuous(labels = \(x) num(x, 0)) +
+  scale_y_continuous(labels = \(x) num(x, 0)) +
+  labs(title = "Perfil de la conducción (CT014-Santa Teresita)",
+       x = "Distancia desde la naciente (m)", y = "Cota (m)") +
+  theme_minimal()
+
+ggplotly(grafico_perfil, tooltip = "text") |>
+  config(locale = "es", displaylogo = FALSE) |>
+  layout(legend = list(orientation = "h", y = -0.2))
+```
+
+La @fig-perfil muestra la conducción completa, de `r num(largo_conduccion, 0)` m. Desde la naciente (`r num(cota_el[["5"]], 1)` m), la tubería de 2 pulgadas baja hasta `r num(min(conduccion$cota_m), 1)` m para cruzar la quebrada por el paso elevado y sube a la caseta de bombeo (`r num(cota_el[["136"]], 1)` m), a unos `r num(elementos_conduccion$distancia_m[elementos_conduccion$id == 136], 0)` m de recorrido. Desde la caseta, la tubería de 2,5 pulgadas sube `r num(desnivel_bombeo, 1)` m en `r num(largo_bombeo, 0)` m hasta el tanque de almacenamiento (`r num(cota_el[["156"]], 1)` m). Ese es el desnivel que debe vencer el bombeo, sin contar las pérdidas por fricción.
+
+### Presión estática en la distribución
+
+La presión estática de un punto es la diferencia entre la cota del tanque que lo abastece y la cota del punto, en metros de columna de agua (m.c.a.). Desde el tanque de almacenamiento, la referencia es la cota del tanque; aguas abajo de cada TQG, la presión se reinicia y la referencia pasa a ser la cota del TQG. Como no tengo el nivel del agua de los tanques, uso la cota medida de cada uno; con 1,2 m³, la altura de agua de los TQG es despreciable para este cálculo. Recorro cada ramal desde su inicio, pasando por su TQG si lo tiene, hasta el final.
+
+```{r}
+#| label: fig-presion
+#| fig-cap: "Presión estática de los vértices de cada ramal de distribución, según el tanque que los abastece; la línea roja marca la posición del TQG. Fuente: levantamiento CT014-Santa Teresita."
+#| fig-height: 6
+ramales <- list(
+  "Oeste" = list(tramos = c("37", "2F", "29"), invertir = c("37", "2F", "29")),
+  "Este" = list(tramos = c("46", "50", "63", "79"), invertir = character(0)),
+  "Norte principal" = list(tramos = c("8E", "9A", "A3"), invertir = character(0)),
+  "Norte secundario" = list(tramos = "AE", invertir = character(0))
+)
+
+presion <- lapply(names(ramales), \(r) {
+  recorrido(ramales[[r]]$tramos, ramales[[r]]$invertir) |>
+    mutate(ramal = r)
+}) |>
+  bind_rows() |>
+  distinct(ramal, distancia_m, .keep_all = TRUE) |>
+  mutate(abastece = case_when(
+           tramo == "79" ~ "TQG 115",
+           tramo %in% c("9A", "A3") ~ "TQG 67",
+           TRUE ~ "Tanque de almacenamiento"),
+         cota_referencia = case_when(
+           abastece == "TQG 115" ~ cota_el[["115"]],
+           abastece == "TQG 67" ~ cota_el[["67"]],
+           TRUE ~ cota_el[["156"]]),
+         presion_m = cota_referencia - cota_m,
+         ramal = factor(ramal, levels = names(ramales)),
+         abastece = factor(abastece, levels = c("Tanque de almacenamiento",
+                                                "TQG 115", "TQG 67")))
+
+posicion_tqg <- presion |>
+  filter(abastece != "Tanque de almacenamiento") |>
+  group_by(ramal) |>
+  summarise(distancia_m = min(distancia_m), tqg = as.character(first(abastece)),
+            .groups = "drop")
+altura_rotulo <- max(presion$presion_m) * 1.12
+
+maximos <- presion |>
+  group_by(ramal) |>
+  slice_max(presion_m, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+ggplot(presion, aes(x = distancia_m, y = presion_m, colour = abastece)) +
+  geom_vline(data = posicion_tqg, aes(xintercept = distancia_m),
+             colour = "#d7191c", linewidth = 1) +
+  geom_label(data = posicion_tqg, aes(x = distancia_m, y = altura_rotulo, label = tqg),
+             colour = "#d7191c", fill = "white", size = 3,
+             inherit.aes = FALSE) +
+  geom_point(size = 1.8) +
+  geom_text(data = maximos,
+            aes(label = paste0("P", punto, ": ", num(presion_m, 1), " m")),
+            vjust = -0.9, hjust = 1, size = 3, colour = "black", show.legend = FALSE) +
+  facet_wrap(~ ramal, ncol = 2, scales = "free_x") +
+  scale_colour_manual(values = c("Tanque de almacenamiento" = "#146b73",
+                                 "TQG 115" = "#d97904", "TQG 67" = "#944ca0"),
+                      name = "Abastece") +
+  scale_y_continuous(labels = \(x) num(x, 0), expand = expansion(mult = c(0.05, 0.25))) +
+  labs(title = "Presión estática en los ramales de distribución",
+       x = "Distancia desde el inicio del ramal (m)", y = "Presión estática (m.c.a.)",
+       caption = fuente) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+```{r}
+#| label: presion-texto
+pmax <- setNames(maximos$presion_m, as.character(maximos$ramal))
+ppto <- setNames(maximos$punto, as.character(maximos$ramal))
+antes_tqg67 <- max(presion$presion_m[presion$ramal == "Norte principal" &
+                                       presion$abastece == "Tanque de almacenamiento"])
+
+presion |>
+  group_by(Ramal = ramal) |>
+  summarise(`Longitud (m)` = num(max(distancia_m), 0),
+            `Presión máxima (m.c.a.)` = num(max(presion_m), 1),
+            `Punto` = paste0("P", punto[which.max(presion_m)]),
+            .groups = "drop") |>
+  knitr::kable(align = "lrrl")
+```
+
+En la @fig-presion, la presión estática más alta del sistema está al final del ramal norte principal: `r num(pmax[["Norte principal"]], 1)` m en el punto P`r ppto[["Norte principal"]]`. En ese ramal, la presión llega a `r num(antes_tqg67, 1)` m antes del TQG 67, cae casi a cero en el TQG y vuelve a subir hasta el final, porque la tubería sigue bajando unos 100 m después del tanque quiebragradiente. En el ramal este, el TQG 115 cumple su función: la presión máxima, `r num(pmax[["Este"]], 1)` m en P`r ppto[["Este"]]`, ocurre antes del TQG, y después de él no supera los `r num(max(presion$presion_m[presion$abastece == "TQG 115"]), 1)` m. El ramal oeste llega a `r num(pmax[["Oeste"]], 1)` m (P`r ppto[["Oeste"]]`) y el norte secundario a `r num(pmax[["Norte secundario"]], 1)` m (P`r ppto[["Norte secundario"]]`). Son presiones estáticas calculadas solo con las cotas del levantamiento; las presiones de operación serán menores por las pérdidas de carga.
+
+## Mapas
+
+### Red de tuberías por diámetro
+
+El primer mapa es estático, hecho con ggplot2. Muestra la tubería coloreada por diámetro y los puntos de interés, sobre el cantón de Buenos Aires como capa de referencia. Lo dibujo en CR-SIRGAS / CRTM05, el SRC de las operaciones, porque la extensión es de unos pocos kilómetros y así las coordenadas de los ejes están en metros. Limito la extensión con `coord_sf()` a la red, con un margen de 150 m.
+
+```{r}
+#| label: fig-mapa-diametros
+#| fig-cap: "Red de tuberías del acueducto de Santa Teresita de Boruca por diámetro nominal, en CR-SIRGAS / CRTM05; los círculos blancos son los puntos de interés. Fuentes: Cenit Topografía (2025); IGN (s. f.)."
+#| fig-height: 6
+colores_diametro <- c("1" = "#4575b4", "1,5" = "#00796b", "2" = "#944ca0",
+                      "2,5" = "#d97904", "3" = "#bf3751")
+extension <- st_bbox(st_buffer(st_as_sfc(st_bbox(tuberias)), 150))
+
+ggplot() +
+  geom_sf(data = canton_sistema, fill = "grey95", colour = "grey60") +
+  geom_sf(data = tuberias, aes(colour = diametro), linewidth = 1.1) +
+  geom_sf(data = interes, shape = 21, fill = "white", colour = "black", size = 2.5) +
+  scale_colour_manual(values = colores_diametro, name = "Diámetro (pulgadas)") +
+  coord_sf(xlim = extension[c("xmin", "xmax")], ylim = extension[c("ymin", "ymax")],
+           datum = st_crs(8908), expand = FALSE) +
+  labs(title = "Red de tuberías por diámetro nominal",
+       subtitle = paste0("Santa Teresita de Boruca, cantón de ", resumen_canton$canton[1]),
+       x = "Este (m)", y = "Norte (m)", caption = fuente_mapa) +
+  theme_minimal() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+La @fig-mapa-diametros muestra que la tubería de 1,5 pulgadas forma la mayor parte de la red (`r num(100 * lon[["1,5"]] / longitud_2d, 1)` % de la longitud en planta). Se distinguen la conducción, de 2 y 2,5 pulgadas, en el sur; la tubería de 3 pulgadas, que baja del tanque hasta la T y continúa hacia el este; y los ramales de distribución, de 2,5, 1,5 y 1 pulgada, hacia el oeste, el este y el norte. El fondo es un solo polígono porque el límite cantonal más cercano está a `r num(dist_limite / 1000, 1)` km.
+
+### Elevación a lo largo de la red
+
+El segundo mapa es interactivo, hecho con leaflet en WGS84, y representa una variable continua: la cota. Dividí cada tubería en los tramos que hay entre dos vértices consecutivos y asigné a cada tramo, con `st_nearest_feature()`, la cota del punto del levantamiento más cercano a su centro; así la línea cambia de color a medida que sube o baja. Para la escala uso `colorNumeric()`, porque la cota es una variable continua. El mapa ofrece dos mapas base de uso libre de Esri, con su atribución: las imágenes de satélite, que se muestran al abrirlo, y el mapa topográfico; rótulos con los elementos principales y el final de cada ramal; un botón, debajo de los de acercamiento, que vuelve a mostrar todo el sistema; y, como capa opcional, los 198 puntos del levantamiento agrupados.
+
+```{r}
+#| label: preparar-mapa-cotas
+coordenadas <- st_coordinates(tuberias) |>
+  as.data.frame() |>
+  group_by(L1) |>
+  mutate(x2 = lead(X), y2 = lead(Y)) |>
+  ungroup() |>
+  filter(!is.na(x2))
+
+geometria_tramos <- lapply(seq_len(nrow(coordenadas)), \(i) {
+  st_linestring(matrix(c(coordenadas$X[i], coordenadas$x2[i],
+                         coordenadas$Y[i], coordenadas$y2[i]), ncol = 2))
+})
+
+tramos <- st_sf(
+  tramo_cad = tuberias$EntityHand[coordenadas$L1],
+  diametro = tuberias$diametro[coordenadas$L1],
+  geometry = st_sfc(geometria_tramos, crs = 8908)
+)
+centros <- st_centroid(st_geometry(tramos))
+tramos$cota_m <- puntos$cota_m[st_nearest_feature(centros, st_zm(puntos))]
+tramos$longitud_m <- as.numeric(st_length(tramos))
+
+knitr::kable(data.frame(
+  Medida = c("Tramos entre vértices", "Longitud total de los tramos (m)",
+             "Cota mínima asignada (m)", "Cota máxima asignada (m)"),
+  Valor = c(nrow(tramos), num(sum(tramos$longitud_m)),
+            num(min(tramos$cota_m), 3), num(max(tramos$cota_m), 3))))
+```
+
+```{r}
+#| label: fig-mapa-cotas
+#| fig-cap: "Elevación de la red de tuberías: cada tramo entre vértices tiene el color de la cota del punto del levantamiento más cercano. Fuentes: Cenit Topografía (2025); Esri, mapas base World Imagery y World Topo Map."
+tramos_web <- st_transform(tramos, 4326)
+puntos_web <- st_transform(st_zm(puntos), 4326)
+limites <- st_bbox(tramos_web)
+
+elementos_web <- interes |>
+  filter(id %in% c(5, 136, 156, 67, 115)) |>
+  mutate(rotulo = case_when(
+    id == 5 ~ "Naciente",
+    id == 136 ~ "Caseta de bombeo",
+    id == 156 ~ "Tanque de almacenamiento",
+    TRUE ~ paste0("TQG ", id))) |>
+  st_transform(4326)
+
+fines_web <- presion |>
+  group_by(ramal) |>
+  slice_max(distancia_m, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  st_as_sf(coords = c("x", "y"), crs = 8908) |>
+  st_transform(4326)
+
+paleta_cota <- colorNumeric(palette = "viridis", domain = tramos_web$cota_m)
+paleta_leyenda <- colorNumeric(palette = "viridis", domain = tramos_web$cota_m, reverse = TRUE)
+
+# Botón para volver a la extensión completa del sistema
+volver_extension <- htmlwidgets::JS(sprintf(
+  "function(btn, map) { map.fitBounds([[%f, %f], [%f, %f]]); }",
+  limites[["ymin"]], limites[["xmin"]], limites[["ymax"]], limites[["xmax"]]))
+
+leaflet() |>
+  addProviderTiles(providers$Esri.WorldImagery, group = "Imágenes de satélite (Esri)") |>
+  addProviderTiles(providers$Esri.WorldTopoMap, group = "Mapa topográfico (Esri)") |>
+  fitBounds(limites[["xmin"]], limites[["ymin"]], limites[["xmax"]], limites[["ymax"]]) |>
+  addEasyButton(easyButton(icon = "fa-expand", title = "Ver todo el sistema",
+                           onClick = volver_extension)) |>
+  addPolylines(data = tramos_web, color = ~paleta_cota(cota_m), weight = 5, opacity = 1,
+               label = ~paste0("Cota: ", num(cota_m, 1), " m · tubería de ", diametro,
+                               " pulg (CAD ", tramo_cad, ")"),
+               highlightOptions = highlightOptions(weight = 8, bringToFront = TRUE),
+               group = "Tubería por cota") |>
+  addCircleMarkers(data = puntos_web, radius = 4, stroke = FALSE,
+                   color = "#555555", fillOpacity = 0.7,
+                   label = ~paste0("P", id, " · ", codigo, " · cota ", num(cota_m, 3), " m"),
+                   clusterOptions = markerClusterOptions(),
+                   group = "Puntos del levantamiento") |>
+  addCircleMarkers(data = elementos_web, radius = 7, stroke = TRUE,
+                   color = "#203843", weight = 2, fillColor = "white", fillOpacity = 1,
+                   label = ~paste0(rotulo, " · ", num(cota_m, 1), " m"),
+                   labelOptions = labelOptions(noHide = TRUE, direction = "top"),
+                   popup = ~paste0("<b>", elemento, "</b><br>",
+                                   "Punto: P", id, "<br>",
+                                   "Código de campo: ", codigo, "<br>",
+                                   "Cota: ", num(cota_m, 3), " m"),
+                   group = "Elementos principales") |>
+  addLabelOnlyMarkers(data = fines_web,
+                      label = ~paste("Fin del ramal", tolower(as.character(ramal))),
+                      labelOptions = labelOptions(noHide = TRUE, direction = "right",
+                                                  textOnly = TRUE,
+                                                  style = list("font-weight" = "bold")),
+                      group = "Elementos principales") |>
+  addLegend(position = "bottomleft", pal = paleta_leyenda, values = tramos_web$cota_m,
+            title = "Cota (m)",
+            labFormat = labelFormat(big.mark = " ",
+                                    transform = \(x) sort(x, decreasing = TRUE)),
+            group = "Tubería por cota") |>
+  addLayersControl(
+    baseGroups = c("Imágenes de satélite (Esri)", "Mapa topográfico (Esri)"),
+    overlayGroups = c("Tubería por cota", "Elementos principales", "Puntos del levantamiento"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) |>
+  hideGroup("Puntos del levantamiento") |>
+  addScaleBar(position = "bottomright", options = scaleBarOptions(imperial = FALSE))
+```
+
+En la @fig-mapa-cotas, los `r nrow(tramos)` tramos van de `r num(min(tramos$cota_m), 1)` a `r num(max(tramos$cota_m), 1)` m; los tonos amarillos son las cotas más altas y los morados, las más bajas. El color más alto está alrededor del tanque de almacenamiento. En la tubería de 2,5 pulgadas que sale de la caseta de bombeo, el color recorre casi toda la escala en `r num(largo_bombeo, 0)` m, porque sube `r num(desnivel_bombeo, 1)` m hasta el tanque. Desde el tanque, la distribución baja hacia el oeste, el este y el norte, y los tonos más oscuros de la red están en el cruce de la quebrada, entre la naciente y la caseta, y al final del ramal norte principal, donde la @fig-presion muestra la presión estática más alta. Al pasar el cursor sobre un tramo aparecen su cota y el diámetro de la tubería.
+
+## Conclusiones
+
+**Pregunta 1.** Medí `r num(longitud_2d)`m de tubería en planta, en `r nrow(tuberias)` polilíneas: `r num(lc[["Conducción"]])`m de conducción y `r num(lc[["Distribución"]])`m de distribución. La tubería de 1,5 pulgadas concentra la mayor longitud (`r num(100 * lon[["1,5"]] / longitud_2d, 1)` %), seguida por la de 2,5 pulgadas (`r num(100 * lon[["2,5"]] / longitud_2d, 1)` %). En 3D, la red mide `r num(longitud_3d)`m.
+
+**Pregunta 2.** La conducción mide `r num(largo_conduccion, 0)`m. La naciente está a `r num(cota_el[["5"]], 1)`m y la caseta de bombeo a `r num(cota_el[["136"]], 1)`m, después de cruzar la quebrada a `r num(min(conduccion$cota_m), 1)`m. Desde la caseta, la tubería de 2,5 pulgadas sube `r num(desnivel_bombeo, 1)`m en `r num(largo_bombeo, 0)`m hasta el tanque de almacenamiento (`r num(cota_el[["156"]], 1)`m), el punto más alto del sistema.
+
+**Pregunta 3.** Todo el sistema está en el cantón de `r resumen_canton$canton[1]`, provincia de `r resumen_canton$provincia[1]`. La presión estática más alta está al final del ramal norte principal, aguas abajo del TQG 67: `r num(pmax[["Norte principal"]], 1)`m en P`r ppto[["Norte principal"]]`. En el ramal este, la presión máxima (`r num(pmax[["Este"]], 1)` m) ocurre antes del TQG 115; en el oeste llega a `r num(pmax[["Oeste"]], 1)` m y en el norte secundario a `r num(pmax[["Norte secundario"]], 1)` m.
+
+**Limitaciones.** Obtuve el diámetro del nombre de la capa CAD; coincide con el código de campo en `r texto_coherencia` que indican diámetro. Las presiones estáticas usan la cota medida de cada tanque, no su nivel de agua, y no consideran pérdidas de carga ni otros elementos que no estén en el levantamiento. El levantamiento no registra material, condición, estado operativo ni conectividad, así que no pude calcular longitudes por estado; el orden de las tuberías en cada recorrido lo armé con su conexión en el dibujo y la descripción del sistema. Para el proyecto final, el siguiente paso es agregar a esta base los atributos de estado y afectación que propuse en la Tarea 1.
+
+## Referencias
+
+Cheng, J., Schloerke, B., Karambelkar, B., y Xie, Y. (2025). *leaflet: Create interactive web maps with the JavaScript 'Leaflet' library* (versión 2.2.3) [paquete de R]. <https://CRAN.R-project.org/package=leaflet>
+
+Dunnington, D., y van den Brand, T. (2026). *ggplot2: Create elegant data visualisations using the grammar of graphics* (versión 4.0.4) [paquete de R]. <https://ggplot2.tidyverse.org/>
+
+Cenit Topografía. (2025, abril). *Levantamiento del acueducto de Santa Teresita de Boruca (CT014-Santa Teresita)* [conjunto de datos geoespaciales]. <https://github.com/Mrxs4915/Tarea-3-cursoR>
+
+Instituto Geográfico Nacional. (s. f.). *Límite cantonal 1:5000* [capa WFS]. Sistema Nacional de Información Territorial. Recuperado el 18 de noviembre de 2026, de <https://geos.snitcr.go.cr/be/IGN_5_CO/wfs>
+
+Leaflet-extras. (s. f.). *Leaflet-providers preview*. Recuperado el 18 de noviembre de 2026, de <https://leaflet-extras.github.io/leaflet-providers/preview/>
+
+Pebesma, E. (2018). Simple features for R: Standardized support for spatial vector data. *The R Journal, 10*(1), 439–446. <https://doi.org/10.32614/RJ-2018-009>
+
+Pebesma, E., y Bivand, R. (2026). *sf: Simple features for R* (versión 1.1-3) [paquete de R]. <https://CRAN.R-project.org/package=sf>
+
+R Core Team. (2026). *R: A language and environment for statistical computing* [software]. R Foundation for Statistical Computing. <https://www.R-project.org/>
+
+Sievert, C., Parmer, C., Hocking, T., Chamberlain, S., Ram, K., Corvellec, M., y Despouy, P. (2026). *plotly: Create interactive web graphics via 'plotly.js'* (versión 4.12.1) [paquete de R]. <https://CRAN.R-project.org/package=plotly>
+
+Universidad de Costa Rica. (2026). *PF-0953 Programación en R: materiales del curso, segundo ciclo 2026*. <https://pf0953-programacionr.github.io/2026-ii/>
+
+Wickham, H. (2016). *ggplot2: Elegant graphics for data analysis*. Springer-Verlag New York. <https://ggplot2.tidyverse.org/>
+
+Wickham, H., François, R., Henry, L., Müller, K., y Vaughan, D. (2026). *dplyr: A grammar of data manipulation* (versión 1.2.1) [paquete de R]. <https://doi.org/10.32614/CRAN.package.dplyr>
+
+Xie, Y., Cheng, J., y Tan, X. (2025). *DT: A wrapper of the JavaScript library 'DataTables'* (versión 0.34.0) [paquete de R]. <https://CRAN.R-project.org/package=DT>
+
+## Declaración de uso de IA
+
+Usé asistentes de inteligencia artificial según los lineamientos del curso:
+
+- **Codex (OpenAI):** para convertir los shapefiles al GeoPackage y revisar una primera versión del código.
+- **Claude (Anthropic):** para revisar el documento contra la consigna y los comentarios de la Tarea 2, verificar las cifras con los archivos de origen, programar el cálculo de la presión estática por ramal, encontrar errores y reescribir el código.
+
+Las decisiones técnicas son mías: qué analizar, cómo funciona el sistema, la división en ramales y el diámetro de la salida del tanque, que corroboré con los planos de diseño.
+
+Revisé, corregí y ejecuté todo el código.
